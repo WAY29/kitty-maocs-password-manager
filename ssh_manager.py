@@ -8,7 +8,10 @@ import getpass
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+from kitty.fast_data_types import add_timer, get_boss
 
 
 class KittenError(Exception):
@@ -181,7 +184,7 @@ def get_existing_keys() -> list[str]:
         raise KittenError(f"Error retrieving keychain keys: {e}") from e
 
 
-def select_key_with_fzf(existing_keys: list[str]) -> tuple[str, bool]:
+def select_key_with_fzf(existing_keys: list[str]) -> tuple[str, str]:
     """
     Use fzf to select an existing SSH connection or create a new one.
 
@@ -189,7 +192,10 @@ def select_key_with_fzf(existing_keys: list[str]) -> tuple[str, bool]:
         existing_keys: List of existing service keys
 
     Returns:
-        Tuple of (selected_key, is_delete_action)
+        Tuple of (selected_key, action) where action is one of:
+        - "connect": Connect to SSH (default)
+        - "delete": Delete the connection
+        - "paste_only": Only paste password without connecting
     """
     try:
         # Format display names for fzf
@@ -202,9 +208,10 @@ def select_key_with_fzf(existing_keys: list[str]) -> tuple[str, bool]:
             [
                 fzf_cmd,
                 "--print-query",
-                "--prompt=Select SSH connection or enter new name (ctrl+D to delete): ",
+                "--prompt=Select SSH connection or enter new name: ",
                 "--bind=ctrl-d:become(echo DELETE:{})+accept",
-                "--header=↵ Connect | ctrl+D Delete | Ctrl+C Cancel",
+                "--bind=ctrl-e:become(echo PASTE:{})+accept",
+                "--header=↵ Connect | ctrl+D Delete | ctrl+E Paste password | Ctrl+C Cancel",
             ],
             input=input_data,
             text=True,
@@ -213,16 +220,28 @@ def select_key_with_fzf(existing_keys: list[str]) -> tuple[str, bool]:
             env=env,
         )
 
-        # Check if user wants to delete (output starts with DELETE:)
+        # Check the output for action prefixes
         output = result.stdout.strip()
+
+        # Check if user wants to delete (output starts with DELETE:)
         if output.startswith("DELETE:"):
             display_name = output[7:]  # Remove "DELETE:" prefix
             # Find the actual service key from display name
             for i, display in enumerate(display_items):
                 if display == display_name:
-                    return (existing_keys[i], True)
+                    return (existing_keys[i], "delete")
             # If not found in display items, try to use as-is
-            return (display_name, True)
+            return (display_name, "delete")
+
+        # Check if user wants to paste only (output starts with PASTE:)
+        if output.startswith("PASTE:"):
+            display_name = output[6:]  # Remove "PASTE:" prefix
+            # Find the actual service key from display name
+            for i, display in enumerate(display_items):
+                if display == display_name:
+                    return (existing_keys[i], "paste_only")
+            # If not found in display items, try to use as-is
+            return (display_name, "paste_only")
 
         # fzf returns:
         # - exit code 0: user selected an item
@@ -231,7 +250,7 @@ def select_key_with_fzf(existing_keys: list[str]) -> tuple[str, bool]:
 
         if result.returncode == 130:
             # User cancelled
-            return ("", False)
+            return ("", "")
 
         output_lines = output.split("\n")
 
@@ -249,9 +268,9 @@ def select_key_with_fzf(existing_keys: list[str]) -> tuple[str, bool]:
             for i, display in enumerate(display_items):
                 if display == selected_display:
                     print(f"DEBUG: Matched! Returning existing key: '{existing_keys[i]}'", file=sys.stderr)
-                    return (existing_keys[i], False)
+                    return (existing_keys[i], "connect")
 
-            return ("", False)
+            return ("", "")
         elif result.returncode == 1:
             # User entered new text (no match)
             # First line is the query text
@@ -261,9 +280,9 @@ def select_key_with_fzf(existing_keys: list[str]) -> tuple[str, bool]:
             if "(" in new_name and ")" in new_name and "@" in new_name:
                 # User might have typed something like the display format, extract friendly name
                 new_name = new_name.split("(")[0].strip()
-            return (new_name, False)
+            return (new_name, "connect")
 
-        return ("", False)
+        return ("", "")
     except FileNotFoundError as e:
         env = get_shell_env()
         current_path = env.get("PATH", "")
@@ -401,90 +420,112 @@ def main(args):  # noqa: ARG001
     Returns:
         SSH command string to execute, or empty string
     """
-    try:
-        # Get existing keys from keychain
-        existing_keys = get_existing_keys()
+    while True:
+        try:
+            # Get existing keys from keychain
+            existing_keys = get_existing_keys()
 
-        # Let user select or enter a key using fzf
-        selected_key, is_delete = select_key_with_fzf(existing_keys)
+            # Let user select or enter a key using fzf
+            selected_key, action = select_key_with_fzf(existing_keys)
 
-        if not selected_key:
-            # User cancelled
-            return ""
+            if not selected_key:
+                # User cancelled
+                return {}
 
-        # Handle delete action
-        if is_delete:
-            if selected_key in existing_keys:
-                if confirm_delete(selected_key):
-                    delete_ssh_from_keychain(selected_key)
-                    kitty_input("\nPress Enter to continue...")
+            # Handle delete action
+            if action == "delete":
+                if selected_key in existing_keys:
+                    if confirm_delete(selected_key):
+                        delete_ssh_from_keychain(selected_key)
+                        time.sleep(1)  # Brief delay to show success message
+                        continue  # Return to fzf selection
+                    else:
+                        time.sleep(0.5)  # Brief delay before returning to fzf
+                        continue  # Return to fzf selection
                 else:
-                    kitty_input("\nPress Enter to continue...")
-                return ""
+                    raise KittenError(f"Cannot delete: '{selected_key}' does not exist")
+
+            # Handle paste only action
+            if action == "paste_only":
+                if selected_key in existing_keys:
+                    # Existing connection - retrieve password and return for paste only
+                    friendly_name, username, hostname = parse_service_name(selected_key)
+
+                    if not username or not hostname:
+                        raise KittenError(f"Invalid SSH connection format for '{selected_key}'")
+
+                    password = get_password_from_keychain(selected_key)
+
+                    print(f"✓ Pasting password for '{friendly_name}' ({username}@{hostname})")
+
+                    # Return dict with password only for paste (no SSH command)
+                    return {
+                        "password_only": password,
+                    }
+                else:
+                    raise KittenError(f"Cannot paste password: '{selected_key}' does not exist")
+
+            # Check if this is a new connection or existing one
+            if selected_key in existing_keys:
+                # Existing connection - retrieve password and return SSH command with password
+                friendly_name, username, hostname = parse_service_name(selected_key)
+
+                if not username or not hostname:
+                    raise KittenError(f"Invalid SSH connection format for '{selected_key}'")
+
+                password = get_password_from_keychain(selected_key)
+
+                print(f"✓ Connecting to '{friendly_name}' ({username}@{hostname})")
+
+                # Return dict with SSH command and password for auto-paste
+                ssh_cmd = (
+                    f"kitty +kitten ssh -o UserKnownHostsFile=/dev/null "
+                    f"-o StrictHostKeyChecking=no {username}@{hostname}"
+                )
+                return {
+                    "ssh_command": ssh_cmd,
+                    "password": password,
+                }
             else:
-                raise KittenError(f"Cannot delete: '{selected_key}' does not exist")
+                # New connection - prompt for details and store it
+                friendly_name = selected_key
+                print(f"\n Creating new SSH connection: {friendly_name}")
 
-        # Check if this is a new connection or existing one
-        if selected_key in existing_keys:
-            # Existing connection - retrieve password and return SSH command with password
-            friendly_name, username, hostname = parse_service_name(selected_key)
+                username = kitty_input("Enter SSH username: ").strip()
+                if not username:
+                    raise KittenError("Username cannot be empty")
 
-            if not username or not hostname:
-                raise KittenError(f"Invalid SSH connection format for '{selected_key}'")
+                hostname = kitty_input("Enter SSH hostname: ").strip()
+                if not hostname:
+                    raise KittenError("Hostname cannot be empty")
 
-            password = get_password_from_keychain(selected_key)
+                password = getpass.getpass("Enter SSH password (hidden): ")
+                if not password:
+                    raise KittenError("Password cannot be empty")
 
-            print(f"✓ Connecting to '{friendly_name}' ({username}@{hostname})")
+                # Confirm password
+                password_confirm = getpass.getpass("Confirm password: ")
+                if password != password_confirm:
+                    raise KittenError("Passwords do not match")
 
-            # Copy password to clipboard
-            copy_to_clipboard(password)
-            print("✓ Password copied to clipboard - paste it when prompted (Cmd+V)")
+                # Store in keychain
+                add_ssh_to_keychain(friendly_name, username, hostname, password)
+                time.sleep(1)  # Brief delay to show success message
+                continue  # Return to fzf selection
 
-            # Return SSH command with newline to auto-execute
-            return (
-                f"kitty +kitten ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no {username}@{hostname}"
-            )
-        else:
-            # New connection - prompt for details and store it
-            friendly_name = selected_key
-            print(f"\n Creating new SSH connection: {friendly_name}")
-
-            username = kitty_input("Enter SSH username: ").strip()
-            if not username:
-                raise KittenError("Username cannot be empty")
-
-            hostname = kitty_input("Enter SSH hostname: ").strip()
-            if not hostname:
-                raise KittenError("Hostname cannot be empty")
-
-            password = getpass.getpass("Enter SSH password (hidden): ")
-            if not password:
-                raise KittenError("Password cannot be empty")
-
-            # Confirm password
-            password_confirm = getpass.getpass("Confirm password: ")
-            if password != password_confirm:
-                raise KittenError("Passwords do not match")
-
-            # Store in keychain
-            add_ssh_to_keychain(friendly_name, username, hostname, password)
+        except KittenError as e:
+            # Display error message and wait for user to acknowledge
+            print(f"\n❌ Error: {e}", file=sys.stderr)
             kitty_input("\nPress Enter to continue...")
-            # Return empty string - don't connect when adding new SSH connection
-            return ""
-
-    except KittenError as e:
-        # Display error message and wait for user to acknowledge
-        print(f"\n❌ Error: {e}", file=sys.stderr)
-        kitty_input("\nPress Enter to continue...")
-        return ""
-    except KeyboardInterrupt:
-        # User interrupted with Ctrl+C
-        return ""
-    except Exception as e:
-        # Unexpected error
-        print(f"\n❌ Unexpected error: {e}", file=sys.stderr)
-        kitty_input("\nPress Enter to continue...")
-        return ""
+            return {}
+        except KeyboardInterrupt:
+            # User interrupted with Ctrl+C
+            return {}
+        except Exception as e:
+            # Unexpected error
+            print(f"\n❌ Unexpected error: {e}", file=sys.stderr)
+            kitty_input("\nPress Enter to continue...")
+            return {}
 
 
 from kittens.tui.handler import result_handler
@@ -497,7 +538,7 @@ def handle_result(args, answer, target_window_id, boss):  # noqa: ARG001
 
     Args:
         args: Command line arguments
-        answer: Return value from main() (the SSH command or SSH_AUTO format)
+        answer: Return value from main() (dict with ssh_command and password, or password_only)
         target_window_id: ID of the window that launched the kitten
         boss: Boss instance for controlling kitty
     """
@@ -507,14 +548,75 @@ def handle_result(args, answer, target_window_id, boss):  # noqa: ARG001
     if w is None:
         return
 
-    # If answer is non-empty, paste it (script path, password, or other text)
-    if answer:
-        w.paste(answer)
-        w.send_key("Enter")
+    # If answer is empty dict, nothing to do
+    if not answer:
+        return
 
+    # Check if this is a password-only paste request
+    password_only = answer.get("password_only", "")
+    if password_only:
+        # Just paste the password without pressing Enter
+        w.paste_text(password_only)
+        return
 
-if __name__ == "__main__":
-    # For testing purposes
-    result = main(sys.argv[1:])
-    if result:
-        print(f"\nWould execute: {result.strip()}")
+    # Extract ssh_command and password from the answer dict
+    ssh_command = answer.get("ssh_command", "")
+    password = answer.get("password", "")
+
+    if not ssh_command:
+        return
+
+    w.paste_text(ssh_command)
+    w.send_key("Enter")
+
+    # If we have a password, set up a timer to detect password prompt
+    if password:
+        attempt_count = 0  # Use list to allow modification in nested function
+        max_attempts = 50
+        interval = 0.05
+
+        def check_for_password_prompt(timer_id: int | None) -> None:
+            """Check screen content for password prompt and paste password if found."""
+            nonlocal attempt_count
+            attempt_count += 1
+
+            # Get current active window dynamically
+            current_boss = get_boss()
+            current_window = current_boss.active_window
+
+            # Fallback to original window if active window is None
+            if current_window is None or current_window.destroyed:
+                current_window = current_boss.window_id_map.get(target_window_id)
+
+            # Check if window is valid
+            if current_window is None or current_window.destroyed:
+                return
+
+            try:
+                # Read screen content
+                screen_text = current_window.as_text(as_ansi=False, add_history=False)
+
+                # Check if "password:" appears in the screen (case-sensitive lowercase)
+                if "password:" in screen_text.lower():
+                    # Found password prompt! Paste password and send Enter
+                    current_window.paste_text(password)
+                    current_window.send_key("Enter")
+                    return  # Stop checking
+
+                # Check if we've reached max attempts
+                if attempt_count >= max_attempts:
+                    return  # Stop checking after max attempts
+
+                # Schedule next check
+                add_timer(check_for_password_prompt, interval, False)
+
+            except Exception:
+                # Silently handle any errors reading screen content
+                pass
+
+        # Start the timer
+        add_timer(check_for_password_prompt, interval, False)
+
+    # Paste the SSH command and execute it
+    w.paste(ssh_command)
+    w.send_key("Enter")

@@ -1,15 +1,18 @@
-# Kitty macOS Keychain Password Manager
+# Kitty macOS Keychain SSH Manager
 
-A kitty kitten plugin that integrates with macOS Keychain for secure password management with fuzzy finding capabilities.
+A kitty kitten plugin that integrates with macOS Keychain for SSH connection management with fuzzy finding capabilities.
 
 ## Features
 
-- 🔐 Stores passwords securely in macOS Keychain
-- 🔍 Uses `fzf` for fast fuzzy finding of password keys
-- ⌨️ Automatically pastes passwords when selected
-- ✨ Simple interface for adding new passwords
-- 🗑️ Delete passwords with `ctrl+D` and one-step confirmation
-- 🛡️ No password storage in plain text files
+- 🔐 Stores SSH credentials securely in macOS Keychain
+- 🔍 Uses `fzf` for fast fuzzy finding of SSH connections
+- 🚀 Automatically connects to SSH and enters password
+- 📋 Paste password only with `ctrl+E` (without auto-connecting)
+- ✨ Simple interface for adding new SSH connections
+- 🗑️ Delete connections with `ctrl+D` and confirmation
+- 🔄 Loops back to selection menu after create/delete operations
+- 🛡️ No credential storage in plain text files
+- 🏷️ Friendly names for SSH connections (e.g., "production-server" → user@host)
 
 ## Requirements
 
@@ -19,70 +22,96 @@ A kitty kitten plugin that integrates with macOS Keychain for secure password ma
 
 ## Installation
 
-1. Copy `password_manager.py` to your kitty config directory:
+1. Copy `ssh_manager.py` to your kitty config directory:
    ```bash
-   cp password_manager.py ~/.config/kitty/
+   cp ssh_manager.py ~/.config/kitty/
    ```
 
 2. Add a keyboard mapping to your `kitty.conf`:
    ```
-   map ctrl+shift+p kitten password_manager.py
+   map ctrl+shift+s kitten ssh_manager.py
    ```
 
 3. Reload kitty configuration or restart kitty.
 
 ## Usage
 
-### Adding a New Password
+### Adding a New SSH Connection
 
-1. Press `Ctrl+Shift+P` (or your configured shortcut)
-2. Type a new key name in the fzf prompt
+1. Press `Ctrl+Shift+S` (or your configured shortcut)
+2. Type a friendly name for the connection in the fzf prompt (e.g., "production-server")
 3. Press `Enter`
-4. Enter the password when prompted (input is hidden)
-5. Confirm the password
-6. The password is now stored in your macOS Keychain
+4. Enter the SSH username when prompted
+5. Enter the SSH hostname when prompted
+6. Enter the password (input is hidden)
+7. Confirm the password
+8. The connection is now stored in your macOS Keychain
+9. You'll be returned to the fzf menu to select another action or connect
 
-### Using an Existing Password
+### Connecting to an SSH Server
 
-1. Press `Ctrl+Shift+P` (or your configured shortcut)
-2. Use fzf to search and select an existing password key
+1. Press `Ctrl+Shift+S` (or your configured shortcut)
+2. Use fzf to search and select an existing SSH connection
 3. Press `Enter`
-4. The password is automatically retrieved and pasted to your terminal
+4. The SSH connection command is automatically executed
+5. The password is automatically entered when prompted
 
-### Deleting a Password
+### Pasting Password Only (without connecting)
 
-1. Press `Ctrl+Shift+P` (or your configured shortcut)
-2. Use fzf to search and select the password key you want to delete
+1. Press `Ctrl+Shift+S` (or your configured shortcut)
+2. Use fzf to search and select an existing SSH connection
+3. Press `Ctrl+E` instead of Enter
+4. The password is pasted to your terminal without pressing Enter
+5. You'll be returned to the fzf menu
+
+### Deleting an SSH Connection
+
+1. Press `Ctrl+Shift+S` (or your configured shortcut)
+2. Use fzf to search and select the connection you want to delete
 3. Press `Ctrl+D` instead of Enter
-4. Review the warning message
+4. Review the warning message showing the connection details
 5. Press `Enter` to confirm deletion, or type `no` to cancel
-6. The password is permanently removed from your keychain
+6. The connection is permanently removed from your keychain
+7. You'll be returned to the fzf menu
+
+## Keyboard Shortcuts in fzf
+
+- `Enter` - Connect to selected SSH server (auto-enter password)
+- `Ctrl+D` - Delete selected connection (with confirmation)
+- `Ctrl+E` - Paste password only (without connecting)
+- `Ctrl+C` - Cancel and exit
 
 ## How It Works
 
-- All passwords are stored in macOS Keychain under the account name `kitty-pass`
-- The service name is used as the key identifier
-- When you select an existing key, the password is retrieved and automatically pasted with a carriage return
-- When you create a new key, the password is stored but not pasted (security feature)
+- All SSH credentials are stored in macOS Keychain under the account name `kitty-ssh`
+- The service name format is: `friendly-name|username@hostname`
+- When you select a connection, the script executes `kitty +kitten ssh` with auto-password entry
+- When you press `Ctrl+E`, only the password is pasted (useful for manual SSH commands)
+- After creating or deleting a connection, you're returned to the fzf menu to perform another action
+- The script automatically detects the password prompt and fills it in
 
 ## Security
 
-- Passwords are stored securely in macOS Keychain, not in plain text files
+- SSH credentials are stored securely in macOS Keychain, not in plain text files
 - Password input is hidden when creating new entries
 - Password confirmation is required when creating new entries
 - Uses macOS's native security mechanisms
+- Auto-password entry uses screen content detection to find the password prompt
+- Connects with `StrictHostKeyChecking=no` for convenience (can be modified in script)
 
 ## Technical Details
 
-- Uses `security add-generic-password` to store passwords
+- Uses `security add-generic-password` to store SSH credentials
 - Uses `security find-generic-password` to retrieve passwords
-- Uses `security delete-generic-password` to remove passwords
-- Uses `security dump-keychain` to list available keys
-- Integrates with kitty's remote control API to paste passwords
+- Uses `security delete-generic-password` to remove credentials
+- Uses `security dump-keychain` to list available connections
+- Integrates with kitty's remote control API to execute SSH commands and paste passwords
 - Automatically detects fzf in Homebrew paths (both Intel and Apple Silicon)
 - Handles shell environment variables to ensure PATH includes common tool locations
 - Implements kitty's kitten interface with proper input handling
+- Uses kitty's screen content reading API to detect password prompts
 - Delete confirmation defaults to "yes" (press Enter) for quick deletion
+- Main loop continues after create/delete operations for better workflow
 
 ## Troubleshooting
 
@@ -106,11 +135,19 @@ Grant terminal access to keychain in System Preferences → Security & Privacy �
 
 You may also need to allow kitty to access the keychain. The first time you run the kitten, macOS will prompt you to allow access.
 
-### Password not pasting
+### Password not auto-filling
 
-Ensure you're using the latest version of kitty and that remote control is enabled (it should work by default with kittens).
+- Ensure you're using the latest version of kitty
+- The script detects "password:" prompt on the screen (case-insensitive)
+- If the prompt uses different text, the password may not auto-fill
+- In that case, use `Ctrl+E` to paste the password manually
+
+### SSH connection issues
+
+- The script uses `UserKnownHostsFile=/dev/null` and `StrictHostKeyChecking=no` for convenience
+- You can modify these settings in the script if you prefer stricter security
+- If you need to use SSH keys, you can still use `Ctrl+E` to paste the password for key passphrases
 
 ## License
 
 MIT
-
